@@ -125,7 +125,11 @@
                 imgTensor = imgTensor.expandDims(0);
                 
                 logDebug("Kör modellen...");
-                return model.predict(imgTensor);
+                const rawPredictions = model.predict(imgTensor);
+                
+                // NYTT: Softmax tvingar råpoängen till procent (summa 1.0)
+                logDebug("Konverterar råpoäng till procent (Softmax)...");
+                return tf.softmax(rawPredictions); 
             });
 
             // Hämta datan synkront till en vanlig JavaScript-array
