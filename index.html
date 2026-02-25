@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blomklassificerare med AI</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f4f4f9; }
+        .container { background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        h1 { color: #333; }
+        #image-preview { max-width: 100%; max-height: 300px; margin-top: 15px; border-radius: 8px; display: none; }
+        #result-box { margin-top: 20px; padding: 15px; border-radius: 8px; background-color: #e8f5e9; display: none; font-size: 1.2em; font-weight: bold; }
+        
+        /* Styling för Debug-rutan */
+        .debug-container { margin-top: 30px; background-color: #1e1e1e; color: #00ff00; padding: 15px; border-radius: 8px; font-family: monospace; overflow-x: auto; }
+        .debug-container h3 { color: #fff; margin-top: 0; }
+        #debug-log { margin: 0; white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Klassificera Blommor 🌸</h1>
+    <p>Ladda upp en bild på en blomma så försöker AI:n gissa vilken det är!</p>
+
+    <input type="file" id="image-upload" accept="image/*" disabled>
+    <br>
+    
+    <img id="image-preview" src="" alt="Uppladdad bild">
+
+    <div id="result-box"></div>
+</div>
+
+<div class="debug-container">
+    <h3>🛠️ System Debug Information</h3>
+    <pre id="debug-log">Laddar TensorFlow.js...</pre>
+</div>
+
+<script>
+    // --- KONFIGURATION ---
+    const MODEL_URL = 'tfjs_model/model.json'; // Sökväg till din modell på GitHub
+    const CONFIDENCE_THRESHOLD = 0.75; // Tröskelvärde på 75%
+    // Standardklasserna för flower_photos datasetet:
+    const CLASSES = ['Prästkrage (Daisy)', 'Maskros (Dandelion)', 'Ros (Rose)', 'Solros (Sunflower)', 'Tulpan (Tulip)'];
+
+    let model = null;
+    const imgElement = document.getElementById('image-preview');
+    const uploadElement = document.getElementById('image-upload');
+    const resultBox = document.getElementById('result-box');
+    const debugLog = document.getElementById('debug-log');
+
+    // Hjälpfunktion för att skriva till debug-rutan
+    function logDebug(message) {
+        const time = new Date().toLocaleTimeString();
+        debugLog.textContent += `\n[${time}] ${message}`;
+        console.log(`[${time}] ${message}`);
+    }
+
+    // --- 1. LADDA MODELLEN ---
+    async function loadModel() {
+        try {
+            logDebug("Försöker ladda modellen från: " + MODEL_URL);
+            // Laddar json och de tillhörande .bin filerna automatiskt
+            model = await tf.loadLayersModel(MODEL_URL);
+            
+            logDebug("✅ Modellen laddades framgångsrikt!");
+            
+            // Läs av modellens input-shape för debug
+            const inputShape = model.inputs[0].shape;
+            logDebug(`Modellen förväntar sig inmatning: [${inputShape}]`);
+            logDebug(`Antal lager i modellen: ${model.layers.length}`);
+            
+            // Aktivera uppladdningsknappen nu när modellen är redo
+            uploadElement.disabled = false;
+            logDebug("Väntar på att användaren ska ladda upp en bild...");
+
+        } catch (error) {
+            logDebug("❌ FEL vid laddning av modell: " + error.message);
+        }
+    }
+
+    // --- 2. HANTERA BILDUPPLADDNING ---
+    uploadElement.addEventListener('change', (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        logDebug(`Bild uppladdad: ${file.name} (${Math.round(file.size/1024)} KB)`);
+        
+        // Skapa en URL för att visa bilden i HTML
+        const imageUrl = URL.createObjectURL(file);
+        imgElement.src = imageUrl;
+        imgElement.style.display = 'block';
+        resultBox.style.display = 'none'; // Dölj gammalt resultat
+
+        // När bilden har ritats upp på skärmen, starta klassificeringen
+        imgElement.onload = () => {
+            logDebug("Bild inläst i DOM. Startar klassificering...");
+            classifyImage();
+        };
+    });
+
+    // --- 3. KLASSIFICERA BILDEN ---
+    async function classifyImage() {
+        if (!model) {
+            logDebug("Varning: Modellen är inte laddad än.");
+            return;
+        }
+
+        try {
+            // Tidy rensar automatiskt upp minnet från tensors efteråt
+            const predictions = tf.tidy(() => {
+                logDebug("Konverterar bild till Tensor...");
+                // Hämta pixlar från img-taggen
+                let imgTensor = tf.browser.fromPixels(imgElement);
+                
+                logDebug("Ändrar storlek till 224x224 (MobileNetV2 standard)...");
+                imgTensor = tf.image.resizeBilinear(imgTensor, [224, 224]);
+                
+                logDebug("Normaliserar pixlar till värden mellan -1 och 1...");
+                // MobileNetV2 förväntar sig oftast värden i [-1, 1]
+                imgTensor = imgTensor.toFloat().div(tf.scalar(127.5)).sub(tf.scalar(1));
+                
+                logDebug("Lägger till batch-dimension: [1, 224, 224, 3]...");
+                imgTensor = imgTensor.expandDims(0);
+                
+                logDebug("Kör modellen...");
+                return model.predict(imgTensor);
+            });
+
+            // Hämta datan synkront till en vanlig JavaScript-array
+            const data = await predictions.data();
+            predictions.dispose(); // Frigör minne
+
+            // Hitta klassen med högst sannolikhet
+            let maxConfidence = 0;
+            let classIndex = -1;
+            for (let i = 0; i < data.length; i++) {
+                if (data[i] > maxConfidence) {
+                    maxConfidence = data[i];
+                    classIndex = i;
+                }
+            }
+
+            const confidencePercent = (maxConfidence * 100).toFixed(1);
+            logDebug(`Resultat: Index ${classIndex} (${CLASSES[classIndex]}) med ${confidencePercent}% säkerhet.`);
+
+            // --- 4. TRÖSKELVÄRDE OCH RESULTAT ---
+            resultBox.style.display = 'block';
+            if (maxConfidence >= CONFIDENCE_THRESHOLD) {
+                resultBox.style.backgroundColor = '#e8f5e9'; // Grön
+                resultBox.style.color = '#2e7d32';
+                resultBox.innerHTML = `Identifikation: <strong>${CLASSES[classIndex]}</strong><br>Säkerhet: ${confidencePercent}%`;
+                logDebug("✅ Identifieringen godkänd (över 75% threshold).");
+            } else {
+                resultBox.style.backgroundColor = '#ffebee'; // Röd
+                resultBox.style.color = '#c62828';
+                resultBox.innerHTML = `⚠️ <strong>Osäker identifiering</strong><br>Modellen gissar på ${CLASSES[classIndex]} (${confidencePercent}%), men är inte tillräckligt säker (kräver 75%).`;
+                logDebug("⚠️ Identifieringen underkänd (under 75% threshold). Klassad som osäker.");
+            }
+
+        } catch (error) {
+            logDebug("❌ FEL under klassificering: " + error.message);
+        }
+    }
+
+    // Starta systemet
+    logDebug("Startar applikationen...");
+    loadModel();
+</script>
+
+</body>
+</html>
